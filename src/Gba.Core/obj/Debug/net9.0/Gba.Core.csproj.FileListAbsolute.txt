@@ -1,0 +1,12 @@
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.GeneratedMSBuildEditorConfig.editorconfig
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.AssemblyInfoInputs.cache
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.AssemblyInfo.cs
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.csproj.CoreCompileInputs.cache
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.sourcelink.json
+/Users/stevenrichter/gba/src/Gba.Core/bin/Debug/net9.0/Gba.Core.deps.json
+/Users/stevenrichter/gba/src/Gba.Core/bin/Debug/net9.0/Gba.Core.dll
+/Users/stevenrichter/gba/src/Gba.Core/bin/Debug/net9.0/Gba.Core.pdb
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.dll
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/refint/Gba.Core.dll
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/Gba.Core.pdb
+/Users/stevenrichter/gba/src/Gba.Core/obj/Debug/net9.0/ref/Gba.Core.dll

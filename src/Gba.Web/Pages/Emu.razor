@@ -1,0 +1,173 @@
+@page "/"
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Components.Web
+@implements IDisposable
+@using System.Collections.Generic
+@using System.IO
+@inject Gba.Web.Services.JsInterop Js
+@using Gba.Core.Emulation
+@using Gba.Core.Abstractions
+
+<div class="emu-shell" tabindex="0" @ref="_inputTarget"
+     @onkeydown="HandleKeyDown" @onkeyup="HandleKeyUp"
+     @onkeydown:preventDefault="true" @onkeyup:preventDefault="true">
+    <div class="controls">
+        <label>
+            ROM
+            <InputFile OnChange="LoadRomAsync" accept=".gba" />
+        </label>
+        <label>
+            BIOS (optional)
+            <InputFile OnChange="LoadBiosAsync" accept=".bin,.gba,.rom" />
+        </label>
+        <label class="toggle">
+            <input type="checkbox" @bind="_skipBios" /> Skip BIOS
+        </label>
+        <button class="btn" @onclick="TogglePause">@(_paused ? "Resume" : "Pause")</button>
+    </div>
+    <canvas id="screen" width="240" height="160"></canvas>
+    <small>Keys: Arrow keys, Z (A), X (B), Enter (Start), Right Shift (Select), Q (L), E (R)</small>
+</div>
+
+@code {
+    private readonly KeyboardInputSource _input = new();
+    private Emulator? _emulator;
+    private VideoSink? _video;
+    private DotNetObjectReference<Emu>? _selfRef;
+    private ElementReference _inputTarget;
+    private bool _initialized;
+    private bool _paused;
+    private byte[]? _bios;
+    private bool _skipBios = true;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await Js.InitCanvasAsync("screen", 240, 160, 3);
+            _selfRef = DotNetObjectReference.Create(this);
+            await Js.StartRafAsync(_selfRef);
+            await InitializeEmulatorAsync(Array.Empty<byte>());
+            _initialized = true;
+        }
+
+        if (_initialized)
+        {
+            await _inputTarget.FocusAsync();
+        }
+    }
+
+    private async Task InitializeEmulatorAsync(byte[] rom)
+    {
+        var options = new EmulatorOptions
+        {
+            SkipBios = _skipBios,
+            Bios = _bios
+        };
+
+        _emulator = new Emulator(rom, options);
+        _input.Reset();
+        _video = new VideoSink(Js);
+        _emulator.Video = _video;
+        _emulator.Input = _input;
+        await Task.CompletedTask;
+    }
+
+    private async Task LoadRomAsync(InputFileChangeEventArgs args)
+    {
+        var file = args.File;
+        using var ms = new MemoryStream();
+        await file.OpenReadStream(maxAllowedSize: 64 * 1024 * 1024).CopyToAsync(ms);
+        await InitializeEmulatorAsync(ms.ToArray());
+        await _inputTarget.FocusAsync();
+    }
+
+    private async Task LoadBiosAsync(InputFileChangeEventArgs args)
+    {
+        var file = args.File;
+        using var ms = new MemoryStream();
+        await file.OpenReadStream(maxAllowedSize: 1 * 1024 * 1024).CopyToAsync(ms);
+        _bios = ms.ToArray();
+    }
+
+    [JSInvokable]
+    public async Task OnRaf()
+    {
+        if (_paused || _emulator is null || _video is null)
+        {
+            return;
+        }
+
+        _emulator.StepFrame();
+        await _video.FlushAsync();
+    }
+
+    private void HandleKeyDown(KeyboardEventArgs args) => _input.KeyDown(args.Code ?? args.Key);
+
+    private void HandleKeyUp(KeyboardEventArgs args)
+    {
+        _input.KeyUp(args.Code ?? args.Key);
+    }
+
+    private void TogglePause() => _paused = !_paused;
+
+    public void Dispose()
+    {
+        _selfRef?.Dispose();
+    }
+
+    private sealed class VideoSink : IVideoSink
+    {
+        private readonly Gba.Web.Services.JsInterop _js;
+        private readonly uint[] _buffer = new uint[240 * 160];
+
+        public VideoSink(Gba.Web.Services.JsInterop js) => _js = js;
+
+        public void PresentFrame(ReadOnlySpan<uint> rgba)
+        {
+            rgba.CopyTo(_buffer);
+        }
+
+        public ValueTask FlushAsync() => _js.PresentAsync(_buffer);
+    }
+
+    private sealed class KeyboardInputSource : IInputSource
+    {
+        private ushort _mask = 0x03FF;
+        private static readonly Dictionary<string, int> Map = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["z"] = 0,          // A
+            ["x"] = 1,          // B
+            ["ShiftRight"] = 2, // Select
+            ["Shift"] = 2,
+            ["Enter"] = 3,      // Start
+            ["NumpadEnter"] = 3,
+            ["ArrowRight"] = 4,
+            ["ArrowLeft"] = 5,
+            ["ArrowUp"] = 6,
+            ["ArrowDown"] = 7,
+            ["e"] = 8,          // R
+            ["q"] = 9           // L
+        };
+
+        public ushort ReadKeys() => _mask;
+
+        public void KeyDown(string key)
+        {
+            if (Map.TryGetValue(key, out var bit))
+            {
+                _mask = (ushort)(_mask & ~(1 << bit));
+            }
+        }
+
+        public void KeyUp(string key)
+        {
+            if (Map.TryGetValue(key, out var bit))
+            {
+                _mask = (ushort)(_mask | (1 << bit));
+            }
+        }
+
+        public void Reset() => _mask = 0x03FF;
+    }
+}
