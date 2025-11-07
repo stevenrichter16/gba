@@ -9,6 +9,9 @@ namespace Gba.Core.Emulation;
 public sealed class Emulator
 {
     private const int CyclesPerFrame = 280_896; // approx 16.7 MHz / 59.7 Hz
+    private const int TotalScanlines = 228; // 160 visible + 68 vblank
+    private const int VisibleScanlines = 160;
+    private const int CyclesPerScanline = CyclesPerFrame / TotalScanlines; // ~1232 cycles
 
     private readonly uint[] _rgba = new uint[240 * 160];
 
@@ -42,7 +45,42 @@ public sealed class Emulator
     {
         Bus.InputSource = Input;
         Bus.LatchInput();
-        Cpu.StepCycles(CyclesPerFrame);
+
+        for (int scanline = 0; scanline < TotalScanlines; scanline++)
+        {
+            // Update VCOUNT register
+            Bus.SetVCount((ushort)scanline);
+
+            // Update DISPSTAT flags
+            ushort dispstat = Bus.DisplayStatus;
+
+            // Set/clear VBLANK flag (bit 0)
+            if (scanline >= VisibleScanlines)
+            {
+                dispstat |= 0x0001; // Set VBLANK flag
+            }
+            else
+            {
+                dispstat &= 0xFFFE; // Clear VBLANK flag
+            }
+
+            Bus.SetDisplayStatus(dispstat);
+
+            // Trigger VBLANK interrupt when entering VBLANK period
+            if (scanline == VisibleScanlines)
+            {
+                // Check if VBLANK interrupt is enabled in DISPSTAT (bit 3)
+                if ((dispstat & 0x0008) != 0)
+                {
+                    Bus.RequestInterrupt(InterruptType.VBlank);
+                }
+            }
+
+            // Execute CPU cycles for this scanline
+            Cpu.StepCycles(CyclesPerScanline);
+        }
+
+        // Render the frame after all scanlines are complete
         Ppu.RenderFrame();
         Ppu.PresentTo(_rgba);
         Video?.PresentFrame(_rgba);

@@ -1,5 +1,6 @@
 using Gba.Core.Cpu;
 using Gba.Core.Memory;
+using Gba.Core.Emulation;
 using Xunit;
 
 namespace Gba.Core.Tests;
@@ -250,5 +251,95 @@ public sealed class InstructionTests
         Assert.Equal(unchecked((uint)(short)0xFFF0), cpu.State.R[4]);
 
         void WriteWord(uint value, int offset) => bus.Write32(codeBase + (uint)offset, value);
+    }
+
+    [Fact]
+    public void InterruptSystem_VBlankInterruptTriggersIrqHandler()
+    {
+        var bus = new MemoryBus(Array.Empty<byte>());
+        var cpu = new Arm7Tdmi(bus);
+
+        // Set up IRQ vector at 0x00000018 to set a flag in memory
+        const uint irqVector = 0x00000018;
+        const uint flagAddress = 0x03000100;
+
+        // IRQ handler: Write 0x12345678 to flagAddress, then return
+        // MOV R0, #0x12000000
+        bus.Write32(irqVector + 0, 0xE3A00612); // MOV R0, #0x12000000 (using rotated immediate)
+        // ORR R0, R0, #0x340000
+        bus.Write32(irqVector + 4, 0xE3800D34); // ORR R0, R0, #0x340000
+        // ORR R0, R0, #0x5000
+        bus.Write32(irqVector + 8, 0xE3800A05); // ORR R0, R0, #0x5000
+        // ORR R0, R0, #0x678
+        bus.Write32(irqVector + 12, 0xE3800C67); // ORR R0, R0, #0x678
+        bus.Write32(irqVector + 16, 0xE3800078); // ORR R0, R0, #0x78
+        // MOV R1, #flagAddress
+        bus.Write32(irqVector + 20, 0xE3A01503); // MOV R1, #0x03000000 | (1 << 8)
+        // STR R0, [R1, #0x100]
+        bus.Write32(irqVector + 24, 0xE5810100); // STR R0, [R1, #0x100]
+        // Acknowledge interrupt: Write to IF register
+        bus.Write32(irqVector + 28, 0xE3A02000); // MOV R2, #0
+        bus.Write32(irqVector + 32, 0xE3A03004); // MOV R3, #4 (base address for I/O)
+        bus.Write32(irqVector + 36, 0xE3833C02); // ORR R3, R3, #0x200
+        bus.Write32(irqVector + 40, 0xE3A02001); // MOV R2, #1 (VBlank bit)
+        bus.Write32(irqVector + 44, 0xE1C320B2); // STRH R2, [R3, #2] (write to IF at 0x04000202)
+        // Return from interrupt: SUBS PC, R14, #4
+        bus.Write32(irqVector + 48, 0xE25EF004); // SUBS PC, R14, #4
+
+        // Main code: Enable interrupts and loop
+        const uint mainCode = 0x03000000;
+        // Enable VBLANK interrupt in DISPSTAT
+        bus.Write32(mainCode + 0, 0xE3A00008); // MOV R0, #8 (VBLANK IRQ enable)
+        bus.Write32(mainCode + 4, 0xE3A01004); // MOV R1, #4 (I/O base)
+        bus.Write32(mainCode + 8, 0xE1C100B4); // STRH R0, [R1, #4] (write to DISPSTAT)
+        // Enable VBLANK interrupt in IE
+        bus.Write32(mainCode + 12, 0xE3A00001); // MOV R0, #1 (VBLANK bit)
+        bus.Write32(mainCode + 16, 0xE3A01004); // MOV R1, #4
+        bus.Write32(mainCode + 20, 0xE3811C02); // ORR R1, R1, #0x200
+        bus.Write32(mainCode + 24, 0xE1C100B0); // STRH R0, [R1] (write to IE at 0x04000200)
+        // Set IME (Interrupt Master Enable)
+        bus.Write32(mainCode + 28, 0xE3A00001); // MOV R0, #1
+        bus.Write32(mainCode + 32, 0xE3A01004); // MOV R1, #4
+        bus.Write32(mainCode + 36, 0xE3811C02); // ORR R1, R1, #0x200
+        bus.Write32(mainCode + 40, 0xE5810008); // STR R0, [R1, #8] (write to IME at 0x04000208)
+        // Clear IRQ disable flag in CPSR to allow interrupts
+        bus.Write32(mainCode + 44, 0xE321F0DF); // MSR CPSR_c, #0xDF (System mode, interrupts enabled)
+        // Infinite loop
+        bus.Write32(mainCode + 48, 0xEAFFFFFE); // B . (loop forever)
+
+        cpu.State.Pc = mainCode;
+
+        // Execute setup code (12 instructions to set up interrupts)
+        for (int i = 0; i < 12; i++)
+        {
+            cpu.StepInstruction();
+        }
+
+        // Verify interrupts are enabled
+        Assert.True(bus.InterruptMasterEnable);
+        Assert.Equal(1, bus.InterruptEnable & 1); // VBLANK enabled
+
+        // Manually trigger VBLANK interrupt
+        bus.RequestInterrupt(InterruptType.VBlank);
+
+        // Execute one more instruction - this should trigger the interrupt handler
+        cpu.StepInstruction();
+
+        // Verify we're now in IRQ mode
+        Assert.Equal(CpuMode.IRQ, cpu.State.Mode);
+        Assert.Equal(irqVector, cpu.State.Pc & ~3u);
+
+        // Execute the IRQ handler (13 instructions)
+        for (int i = 0; i < 13; i++)
+        {
+            cpu.StepInstruction();
+        }
+
+        // Verify the flag was set by the IRQ handler
+        uint flagValue = bus.Read32(flagAddress);
+        Assert.Equal(0x12345678u, flagValue);
+
+        // Verify we've returned from the interrupt
+        Assert.NotEqual(CpuMode.IRQ, cpu.State.Mode);
     }
 }
