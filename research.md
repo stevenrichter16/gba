@@ -196,3 +196,236 @@ Building a browser-based GBA emulator in C# is complex, so the work is organized
 - Qkmaxware's BlazorBoy (Game Boy) and gb-net for examples of separating core logic and Blazor UI plus using .NET AOT in WebAssembly.
 - Stack Overflow threads on Blazor canvas blitting via JS interop.
 - Microsoft docs on Blazor WebAssembly AOT compilation and deployment best practices.
+
+## Developer-Friendly Outline (C# + Blazor WASM)
+The following plan turns the roadmap into an actionable scaffold you can implement immediately.
+
+### High-Level Goals
+- Prioritize video output, then input; sound and fine timing can follow.
+- Support desktop and mobile browsers with a responsive canvas and on-screen controls.
+- Use .NET + Blazor WebAssembly (enable AoT later for performance), render via HTML canvas interop.
+- Accept user-supplied `.gba` ROMs and start with a "skip BIOS" init path.
+
+### Solution Layout
+```
+GbaEmu.sln
+|- src/
+|  |- Gba.Core/           # emulator logic only
+|  |  |- Cpu/
+|  |  |- Memory/
+|  |  |- Ppu/
+|  |  |- Input/
+|  |  |- Cartridge/
+|  |  |- Emulation/
+|  |  |- Abstractions/
+|  |  \- Util/
+|  \- Gba.Web/            # Blazor WASM UI + JS interop
+|     |- Pages/Emu.razor
+|     |- Components/OnScreenPad.razor
+|     |- wwwroot/js/canvas.js
+|     \- Services/Interop.cs
+tests/
+\- Gba.Core.Tests/
+```
+
+### Core Abstractions (Gba.Core)
+```csharp
+public interface IVideoSink {
+    void PresentFrame(ReadOnlySpan<uint> rgba);
+}
+
+public interface IAudioSink {
+    void EnqueueSamples(ReadOnlySpan<short> interleavedStereo);
+}
+
+public interface IInputSource {
+    ushort ReadKeys(); // active-low KEYINPUT mask
+}
+```
+
+### CPU (ARM7TDMI)
+- `CpuState`: register array, CPSR/SPSR per mode, mode enum, T flag, cycle counter.
+- `DecoderArm` / `DecoderThumb`: mask-based dispatch tables.
+- Interpreter loop: fetch (align by state), apply condition codes, execute handler, update flags/PC, accumulate cycles.
+- Start with MOV/ADD/SUB/AND/ORR/EOR/CMP/LDR/STR/B/BL/BX, then expand.
+
+### Memory Bus
+- `MemoryBus.Read8/16/32` and write counterparts; fast range checks for BIOS, EWRAM, IWRAM, IO, PRAM, VRAM, OAM, ROM.
+- `IoMap` handles register side effects (DISPCNT writes, KEYINPUT reads, timer/DMA stubs).
+- Simple open-bus behavior for unmapped reads to avoid crashes.
+
+### PPU (Video-First)
+- Mode 3 focus: VRAM as 240x160 RGB555 array; convert to RGBA32 in `PresentFrame`.
+- Minimal registers: DISPCNT plus palette/VRAM banks; later add tile modes, sprites, windows, blending.
+- Rendering v1: full-frame render after each CPU batch; upgrade to scanline approach later.
+
+### Cartridge
+- Load ROM bytes from UI, expose as read-only span at 0x08000000.
+- Stubs for SRAM/Flash/EEPROM with hooks for browser persistence later.
+
+### Emulator Orchestrator
+```csharp
+public sealed class Emulator {
+    public Arm7Tdmi Cpu { get; }
+    public MemoryBus Bus { get; }
+    public Ppu Ppu { get; }
+    public IInputSource Input { get; set; }
+    public IVideoSink Video { get; set; }
+
+    private const int CyclesPerFrame = 281_000; // rough
+
+    public void StepFrame() {
+        var target = Cpu.Cycles + CyclesPerFrame;
+        while (Cpu.Cycles < target) {
+            Cpu.StepInstruction();
+            // future: timers, DMA, interrupts
+        }
+        Video?.PresentFrame(Ppu.GetRgbaFrame());
+    }
+}
+```
+
+### Blazor Frontend (Gba.Web)
+- JavaScript (`wwwroot/js/canvas.js`): init canvas, blit RGBA buffers via `putImageData`, run `requestAnimationFrame`, and marshal frames into .NET.
+- `Emu.razor`: ROM loader, canvas element, controls (pause/reset/FPS), and mobile overlay component.
+- `OnScreenPad.razor`: touch zones that update an `InputState`.
+- `Interop.cs`: strongly typed wrappers over `IJSRuntime`.
+- Frame loop: JS rAF calls `[JSInvokable] OnRafTick` -> call `_emu.StepFrame()` -> `PresentFrame`.
+
+### Input Handling
+- Desktop: global keydown/up events update `InputState` (active-low mask).
+- Mobile: `OnScreenPad` uses pointer/touch events with multitouch support.
+- Optionally plan for Gamepad API via JS interop.
+
+### Incremental Feature Plan
+1. Scaffold solution, load ROM, implement minimal MemoryBus and CPU instructions, run loop headless.
+2. Add Mode 3 PPU and canvas blit; verify with Mode 3 homebrew.
+3. Wire KEYINPUT and desktop keyboard input.
+4. Implement smooth rAF-driven main loop and responsive canvas scaling.
+5. Optimize (Release builds, reduce allocations, batch JS calls, later AoT).
+6. Expand PPU (tile BGs, sprites, palette effects).
+7. Add audio (Direct Sound FIFOs first) and Web Audio integration.
+8. Implement persistence (SRAM/Flash saves via IndexedDB/localStorage, save states).
+
+### Technical Notes
+- Maintain KEYINPUT as a ushort where 1 = released, 0 = pressed.
+- RGB555 -> RGBA: `(channel5 << 3) | (channel5 >> 2)` per color; pack into `uint`.
+- Always send full frames (240*160) over interop to minimize overhead.
+- Start with per-frame cycle budgeting; add scanline timing and IRQs later.
+- Keep MemoryBus hot paths lean; consider `Span<byte>` or `unsafe` once correctness is verified.
+- Add unit tests for CPU ops and integrate community ROM tests (gba-suite, ARMWrestler) into `Gba.Core.Tests`.
+
+## Practical Backlog (C# + Blazor GBA Emulator)
+### Immediate To-Do (ordered)
+1. **Memory bus MVP**
+   - Implement `MemoryBus.Read/Write 8/16/32` with BIOS (stub), EWRAM, IWRAM, IO, PRAM, VRAM, OAM, ROM regions.
+   - Add helpers for range checks and default open-bus values.
+   - DoD: CPU can fetch from ROM and read/write IWRAM; boundary tests pass.
+2. **Minimal CPU core**
+   - Implement ARM/THUMB fetch, PC behavior, condition codes, and op set (MOV/MVN, ADD/SUB/ADC/SBC, logic ops, flag-only ops, LDR/STR byte/word, B/BL/BX).
+   - DoD: Unit tests for arithmetic/branches succeed; mixed ARM/THUMB homebrew loop runs.
+3. **DISPCNT + Mode 3 pipeline**
+   - Honor DISPCNT mode bits, expose Mode 3 VRAM view, build `Ppu.GetRgbaFrame()` (RGB555 -> RGBA32).
+   - DoD: Mode 3 demo fills VRAM and displays colors on canvas.
+4. **Blazor canvas + rAF loop**
+   - JS: `initCanvas`, `presentFrame(Uint32Array)`, rAF callback invoking `[JSInvokable]`.
+   - Blazor: ROM upload -> Cartridge, `Emulator.StepFrame()` -> present frame.
+   - DoD: Canvas updates smoothly (~60 Hz) with a basic color animation.
+5. **Keyboard input to KEYINPUT**
+   - Map desktop keys (Arrows, Z/X, Enter, Shift, L/R) to active-low mask returned via `IInputSource`.
+   - DoD: Mode 3 input demo reacts to key presses.
+6. **Frame pacing and simple VBlank**
+   - Use ~281k cycles per frame, set VBlank flag after each `StepFrame`, add Pause/Resume controls.
+   - DoD: Stable speed without runaway loops or UI hitching.
+7. **Testing harness + ROM sanity**
+   - Console test project executing CPU unit tests plus a minimal Mode 3 ROM golden image check.
+   - DoD: Arithmetic/branch tests green; sample frame hash matches expectation.
+8. **Mobile touch controls**
+   - On-screen D-pad + A/B/Start/Select/L/R with multitouch merging into KEYINPUT.
+   - DoD: Phone browser supports two simultaneous touches controlling a demo.
+9. **AOT build + perf pass**
+   - Enable WASM AoT, batch interop (single frame array), eliminate hot-path allocations/bounds-checks.
+   - DoD: Desktop FPS improves noticeably; mobile acceptable for simple scenes.
+10. **Tile Mode 0 (BG0)**
+    - Implement BG0 tile rendering (4bpp charblocks, tilemaps, scroll).
+    - DoD: Simple tiled background demo scrolls correctly.
+
+### Shortly After
+11. **Sprites v1** - basic 16/256-color sprites, per-scanline culling, priority with BG0.
+12. **Interrupts & timers** - IE/IF/IME, VBlank IRQ, Timer 0/1 overflow handling.
+13. **DMA (pragmatic)** - immediate + VBlank DMA copies, sound FIFO triggers stubbed.
+14. **Save memory** - SRAM abstraction persisted via IndexedDB/localStorage keyed by ROM hash.
+15. **PPU completeness** - BG1-3, affine, modes 4/5, windows, blending, mosaic, scanline renderer.
+16. **Audio subsystem** - Direct Sound FIFOs, timers, Web Audio integration, optional toggle.
+
+### Guardrails
+- Each task needs a Definition of Done backed by a ROM/demo or unit test.
+- Keep `Gba.Core` UI-free; rely on `IVideoSink` and `IInputSource`.
+- Avoid premature cycle accuracy; focus on correctness up to BG0 + sprites.
+- Batch interop: one `Uint32Array` per frame, no per-pixel JS calls.
+- Add tests alongside new opcode/features.
+
+### Quick Checklist (today)
+- Finalize memory regions/open-bus defaults.
+- Implement MOV/ALU/branch/LDR-STR with THUMB fetch.
+- Wire DISPCNT + Mode 3 VRAM -> RGBA path.
+- Hook JS `presentFrame` + Blazor rAF loop calling `StepFrame`.
+- Connect keyboard input to KEYINPUT.
+
+## Setup & Workflow Guide (Rider + Blazor)
+### 0) Prereqs
+- Install .NET 8 SDK (or newer) and JetBrains Rider.
+- Set up Git/GitHub access (token if HTTPS + 2FA).
+
+### 1) Create the Solution
+1. New Solution -> .NET -> Empty Solution (name `GbaEmu`).
+2. Add projects:
+   - Blazor WebAssembly App (`Gba.Web`, .NET 8, standalone).
+   - Class Library (`Gba.Core`, .NET 8).
+3. Add project reference `Gba.Web` -> `Gba.Core`.
+4. Set `Gba.Web` as startup.
+
+### 2) Scaffold `Gba.Core`
+- Folders: `Cpu`, `Memory`, `Ppu`, `Emulation`, `Input`, `Abstractions`, `Cartridge`, `Util`.
+- Key files:
+  - `Abstractions/IVideoSink.cs` and `Abstractions/IInputSource.cs` defining simple interfaces.
+  - `Emulation/Emulator.cs` building `MemoryBus`/`SimplePpu`, holding a buffer, and calling `Video?.PresentFrame`.
+  - `Ppu/SimplePpu.cs` rendering a temporary Mode 3 gradient and converting RGB555 to RGBA32.
+- Result: core can generate a test frame.
+
+### 3) Blazor Front End
+- `wwwroot/js/canvas.js`: exposes `initCanvas`, `presentFrame`, `startRaf`.
+- Include `<script src="js/canvas.js"></script>` in `wwwroot/index.html`.
+- `Services/JsInterop.cs`: typed wrappers around the JS helpers; register with DI in `Program.cs`.
+- `Pages/Emu.razor`: file input, canvas, and `[JSInvokable] OnRaf` method driving `_emu.StepFrame()` then calling `PresentAsync`.
+- Implement `VideoSink` (buffers latest frame) and `NullInput` (all buttons released). Replace dummy ROM with `<InputFile>` loading actual bytes into `Emulator`.
+
+### 4) Git Setup
+- Enable Git in Rider (VCS -> Enable Version Control Integration -> Git).
+- Add `.gitignore` (bin/obj/.idea, etc.).
+- Commit initial scaffold ("Initial Blazor + core scaffold").
+
+### 5) Push to GitHub
+- Use Rider's Share Project on GitHub or CLI:
+  ```
+  git init
+  git add .
+  git commit -m "Initial Blazor + core scaffold"
+  git branch -M main
+  git remote add origin https://github.com/<user>/gba-emu.git
+  git push -u origin main
+  ```
+- Verify repo on GitHub.
+
+### 6) Next Commits
+- Flesh out `MemoryBus`, `DISPCNT`, `KEYINPUT`.
+- Implement CPU fetch + MOV/ADD/STR/LDR/BL/BX.
+- Replace gradient with actual Mode 3 VRAM reads.
+- Add desktop keyboard input and frame pacing controls.
+
+### Troubleshooting
+- If canvas blank: ensure `canvas.js` loads and `presentFrame` gets 38400-pixel array.
+- If Blazor doesn't run: confirm `Gba.Web` targets `net8.0` and is startup.
+- For large ROMs, increase `OpenReadStream` limit (example: 64 MB).
+
+Following these steps yields a runnable Blazor app with a placeholder PPU, ready for iterative emulator development and GitHub collaboration.
