@@ -479,21 +479,101 @@ public sealed class Arm7Tdmi
         ushort opcode = _bus.Read16(pc);
         _state.Pc = pc + 2;
 
-        switch (opcode >> 13)
+        // Decode instruction format based on opcode bits
+        if ((opcode & 0xF800) == 0x1800)
         {
-            case 0b000: // shift/move/add/sub
-                ExecuteThumbShiftAddSub(opcode);
-                break;
-            case 0b001: // immediate add/sub/mov
-                ExecuteThumbImmediate(opcode);
-                break;
-            case 0b010:
-            case 0b011:
-                ExecuteThumbLoadStore(opcode);
-                break;
-            case 0b111 when ((opcode & 0xF800) == 0xF000 || (opcode & 0xF800) == 0xE000):
-                ExecuteThumbBranch(opcode);
-                break;
+            // Format 2: add/subtract
+            ExecuteThumbAddSubtract(opcode);
+        }
+        else if ((opcode & 0xE000) == 0x0000)
+        {
+            // Format 1: move shifted register
+            ExecuteThumbShiftAddSub(opcode);
+        }
+        else if ((opcode & 0xE000) == 0x2000)
+        {
+            // Format 3: move/compare/add/subtract immediate
+            ExecuteThumbImmediate(opcode);
+        }
+        else if ((opcode & 0xFC00) == 0x4000)
+        {
+            // Format 4: ALU operations
+            ExecuteThumbAlu(opcode);
+        }
+        else if ((opcode & 0xFC00) == 0x4400)
+        {
+            // Format 5: Hi register operations/branch exchange
+            ExecuteThumbHiRegBx(opcode);
+        }
+        else if ((opcode & 0xF800) == 0x4800)
+        {
+            // Format 6: PC-relative load
+            ExecuteThumbPcRelativeLoad(opcode);
+        }
+        else if ((opcode & 0xF200) == 0x5000)
+        {
+            // Format 7: load/store with register offset
+            ExecuteThumbLoadStoreRegOffset(opcode);
+        }
+        else if ((opcode & 0xF200) == 0x5200)
+        {
+            // Format 8: load/store sign-extended byte/halfword
+            ExecuteThumbLoadStoreSignExtended(opcode);
+        }
+        else if ((opcode & 0xE000) == 0x6000)
+        {
+            // Format 9: load/store with immediate offset
+            ExecuteThumbLoadStoreImmOffset(opcode);
+        }
+        else if ((opcode & 0xF000) == 0x8000)
+        {
+            // Format 10: load/store halfword
+            ExecuteThumbLoadStoreHalfword(opcode);
+        }
+        else if ((opcode & 0xF000) == 0x9000)
+        {
+            // Format 11: SP-relative load/store
+            ExecuteThumbSpRelativeLoadStore(opcode);
+        }
+        else if ((opcode & 0xF000) == 0xA000)
+        {
+            // Format 12: load address
+            ExecuteThumbLoadAddress(opcode);
+        }
+        else if ((opcode & 0xFF00) == 0xB000)
+        {
+            // Format 13: add offset to stack pointer
+            ExecuteThumbAddOffsetToSp(opcode);
+        }
+        else if ((opcode & 0xF600) == 0xB400)
+        {
+            // Format 14: push/pop registers
+            ExecuteThumbPushPop(opcode);
+        }
+        else if ((opcode & 0xF000) == 0xC000)
+        {
+            // Format 15: multiple load/store
+            ExecuteThumbMultipleLoadStore(opcode);
+        }
+        else if ((opcode & 0xFF00) == 0xDF00)
+        {
+            // Format 17: software interrupt
+            ExecuteThumbSwi(opcode);
+        }
+        else if ((opcode & 0xF000) == 0xD000)
+        {
+            // Format 16: conditional branch
+            ExecuteThumbConditionalBranch(opcode);
+        }
+        else if ((opcode & 0xF800) == 0xE000)
+        {
+            // Format 18: unconditional branch
+            ExecuteThumbBranch(opcode);
+        }
+        else if ((opcode & 0xF000) == 0xF000)
+        {
+            // Format 19: long branch with link
+            ExecuteThumbLongBranchLink(opcode);
         }
     }
 
@@ -579,36 +659,447 @@ public sealed class Arm7Tdmi
         }
     }
 
-    private void ExecuteThumbLoadStore(ushort opcode)
+    private void ExecuteThumbAddSubtract(ushort opcode)
     {
-        int op = (opcode >> 13) & 0x3;
+        bool immediate = ((opcode >> 10) & 1) != 0;
+        bool subtract = ((opcode >> 9) & 1) != 0;
+        int rn = (opcode >> 6) & 0x7;
+        int rs = (opcode >> 3) & 0x7;
+        int rd = opcode & 0x7;
+
+        uint operand = immediate ? (uint)rn : _state.R[rn];
+        uint rsVal = _state.R[rs];
+        uint result;
+
+        if (subtract)
+        {
+            result = rsVal - operand;
+            _state.R[rd] = result;
+            SetArithFlags(result, rsVal, operand, subtraction: true);
+        }
+        else
+        {
+            result = rsVal + operand;
+            _state.R[rd] = result;
+            SetArithFlags(result, rsVal, operand, subtraction: false);
+        }
+    }
+
+    private void ExecuteThumbAlu(ushort opcode)
+    {
+        int op = (opcode >> 6) & 0xF;
+        int rs = (opcode >> 3) & 0x7;
+        int rd = opcode & 0x7;
+        uint rdVal = _state.R[rd];
+        uint rsVal = _state.R[rs];
+        uint result;
+
         switch (op)
         {
-            case 0b010: // LDR literal or load/store register offset
-                if ((opcode & 0x1800) == 0x1800)
-                {
-                    // LDR literal
-                    int rd = (opcode >> 8) & 0x7;
-                    uint imm = (uint)((opcode & 0xFF) << 2);
-                    uint addr = (_state.Pc & ~3u) + imm;
-                    _state.R[rd] = _bus.Read32(addr);
-                }
+            case 0x0: // AND
+                result = rdVal & rsVal;
+                _state.R[rd] = result;
+                SetLogicalFlags(result, _state.GetFlag(CpuFlags.Carry));
                 break;
-            case 0b011:
-                int rdReg = opcode & 0x7;
-                int rb = (opcode >> 3) & 0x7;
-                uint offset = (uint)(((opcode >> 6) & 0x1F) << 2);
-                if ((opcode & 0x0400) != 0)
+            case 0x1: // EOR
+                result = rdVal ^ rsVal;
+                _state.R[rd] = result;
+                SetLogicalFlags(result, _state.GetFlag(CpuFlags.Carry));
+                break;
+            case 0x2: // LSL
+                var (lsl, carryLsl) = ShiftLeft(rdVal, (int)(rsVal & 0xFF));
+                _state.R[rd] = lsl;
+                SetLogicalFlags(lsl, carryLsl);
+                break;
+            case 0x3: // LSR
+                var (lsr, carryLsr) = ShiftRightLogical(rdVal, (int)(rsVal & 0xFF));
+                _state.R[rd] = lsr;
+                SetLogicalFlags(lsr, carryLsr);
+                break;
+            case 0x4: // ASR
+                var (asr, carryAsr) = ShiftRightArithmetic(rdVal, (int)(rsVal & 0xFF));
+                _state.R[rd] = asr;
+                SetLogicalFlags(asr, carryAsr);
+                break;
+            case 0x5: // ADC
+                uint carry = _state.GetFlag(CpuFlags.Carry) ? 1u : 0u;
+                result = rdVal + rsVal + carry;
+                _state.R[rd] = result;
+                SetAdcFlags(result, rdVal, rsVal, carry);
+                break;
+            case 0x6: // SBC
+                carry = _state.GetFlag(CpuFlags.Carry) ? 1u : 0u;
+                result = rdVal - rsVal - (1u - carry);
+                _state.R[rd] = result;
+                SetSbcFlags(result, rdVal, rsVal, carry);
+                break;
+            case 0x7: // ROR
+                uint rorAmount = rsVal & 0xFF;
+                if (rorAmount == 0)
                 {
-                    // LDR word
-                    _state.R[rdReg] = _bus.Read32(_state.R[rb] + offset);
+                    SetLogicalFlags(rdVal, _state.GetFlag(CpuFlags.Carry));
                 }
                 else
                 {
-                    _bus.Write32(_state.R[rb] + offset, _state.R[rdReg]);
+                    var (ror, carryRor) = RotateRight(rdVal, (int)(rorAmount & 0x1F));
+                    _state.R[rd] = ror;
+                    SetLogicalFlags(ror, carryRor);
                 }
                 break;
+            case 0x8: // TST
+                result = rdVal & rsVal;
+                SetLogicalFlags(result, _state.GetFlag(CpuFlags.Carry));
+                break;
+            case 0x9: // NEG
+                result = 0 - rsVal;
+                _state.R[rd] = result;
+                SetArithFlags(result, 0, rsVal, subtraction: true);
+                break;
+            case 0xA: // CMP
+                result = rdVal - rsVal;
+                SetArithFlags(result, rdVal, rsVal, subtraction: true);
+                break;
+            case 0xB: // CMN
+                result = rdVal + rsVal;
+                SetArithFlags(result, rdVal, rsVal, subtraction: false);
+                break;
+            case 0xC: // ORR
+                result = rdVal | rsVal;
+                _state.R[rd] = result;
+                SetLogicalFlags(result, _state.GetFlag(CpuFlags.Carry));
+                break;
+            case 0xD: // MUL
+                result = rdVal * rsVal;
+                _state.R[rd] = result;
+                SetLogicalFlags(result, false);
+                _state.CycleCount += 3; // Multiply takes extra cycles
+                break;
+            case 0xE: // BIC
+                result = rdVal & ~rsVal;
+                _state.R[rd] = result;
+                SetLogicalFlags(result, _state.GetFlag(CpuFlags.Carry));
+                break;
+            case 0xF: // MVN
+                result = ~rsVal;
+                _state.R[rd] = result;
+                SetLogicalFlags(result, _state.GetFlag(CpuFlags.Carry));
+                break;
         }
+    }
+
+    private void ExecuteThumbHiRegBx(ushort opcode)
+    {
+        int op = (opcode >> 8) & 0x3;
+        bool h1 = ((opcode >> 7) & 1) != 0;
+        bool h2 = ((opcode >> 6) & 1) != 0;
+        int rs = ((opcode >> 3) & 0x7) | (h2 ? 8 : 0);
+        int rd = (opcode & 0x7) | (h1 ? 8 : 0);
+
+        switch (op)
+        {
+            case 0: // ADD
+                _state.R[rd] += _state.R[rs];
+                if (rd == 15)
+                {
+                    _state.Pc &= ~1u; // Align PC
+                }
+                break;
+            case 1: // CMP
+                uint result = _state.R[rd] - _state.R[rs];
+                SetArithFlags(result, _state.R[rd], _state.R[rs], subtraction: true);
+                break;
+            case 2: // MOV
+                _state.R[rd] = _state.R[rs];
+                if (rd == 15)
+                {
+                    _state.Pc &= ~1u; // Align PC
+                }
+                break;
+            case 3: // BX
+                uint target = _state.R[rs];
+                _state.Thumb = (target & 1) != 0;
+                _state.Pc = target & 0xFFFFFFFEu;
+                break;
+        }
+    }
+
+    private void ExecuteThumbPcRelativeLoad(ushort opcode)
+    {
+        int rd = (opcode >> 8) & 0x7;
+        uint imm = (uint)((opcode & 0xFF) << 2);
+        uint addr = (_state.Pc & ~3u) + imm;
+        _state.R[rd] = _bus.Read32(addr);
+    }
+
+    private void ExecuteThumbLoadStoreRegOffset(ushort opcode)
+    {
+        int ro = (opcode >> 6) & 0x7;
+        int rb = (opcode >> 3) & 0x7;
+        int rd = opcode & 0x7;
+        uint address = _state.R[rb] + _state.R[ro];
+
+        if ((opcode & 0x0800) != 0) // Load
+        {
+            if ((opcode & 0x0400) != 0) // Byte
+            {
+                _state.R[rd] = _bus.Read8(address);
+            }
+            else // Word
+            {
+                _state.R[rd] = _bus.Read32(address);
+            }
+        }
+        else // Store
+        {
+            if ((opcode & 0x0400) != 0) // Byte
+            {
+                _bus.Write8(address, (byte)_state.R[rd]);
+            }
+            else // Word
+            {
+                _bus.Write32(address, _state.R[rd]);
+            }
+        }
+    }
+
+    private void ExecuteThumbLoadStoreSignExtended(ushort opcode)
+    {
+        int ro = (opcode >> 6) & 0x7;
+        int rb = (opcode >> 3) & 0x7;
+        int rd = opcode & 0x7;
+        uint address = _state.R[rb] + _state.R[ro];
+
+        if ((opcode & 0x0800) != 0) // Load
+        {
+            if ((opcode & 0x0400) != 0) // Sign-extended byte
+            {
+                sbyte value = (sbyte)_bus.Read8(address);
+                _state.R[rd] = (uint)(int)value;
+            }
+            else // Sign-extended halfword
+            {
+                short value = (short)_bus.Read16(address);
+                _state.R[rd] = (uint)(int)value;
+            }
+        }
+        else // Store halfword
+        {
+            _bus.Write16(address, (ushort)_state.R[rd]);
+        }
+    }
+
+    private void ExecuteThumbLoadStoreImmOffset(ushort opcode)
+    {
+        uint offset = (uint)((opcode >> 6) & 0x1F);
+        int rb = (opcode >> 3) & 0x7;
+        int rd = opcode & 0x7;
+
+        bool load = ((opcode >> 11) & 1) != 0;
+        bool byteTransfer = ((opcode >> 12) & 1) != 0;
+
+        if (byteTransfer)
+        {
+            uint address = _state.R[rb] + offset;
+            if (load)
+            {
+                _state.R[rd] = _bus.Read8(address);
+            }
+            else
+            {
+                _bus.Write8(address, (byte)_state.R[rd]);
+            }
+        }
+        else
+        {
+            uint address = _state.R[rb] + (offset << 2);
+            if (load)
+            {
+                _state.R[rd] = _bus.Read32(address);
+            }
+            else
+            {
+                _bus.Write32(address, _state.R[rd]);
+            }
+        }
+    }
+
+    private void ExecuteThumbLoadStoreHalfword(ushort opcode)
+    {
+        uint offset = (uint)(((opcode >> 6) & 0x1F) << 1);
+        int rb = (opcode >> 3) & 0x7;
+        int rd = opcode & 0x7;
+        uint address = _state.R[rb] + offset;
+
+        if ((opcode & 0x0800) != 0) // Load
+        {
+            _state.R[rd] = _bus.Read16(address);
+        }
+        else // Store
+        {
+            _bus.Write16(address, (ushort)_state.R[rd]);
+        }
+    }
+
+    private void ExecuteThumbSpRelativeLoadStore(ushort opcode)
+    {
+        int rd = (opcode >> 8) & 0x7;
+        uint offset = (uint)((opcode & 0xFF) << 2);
+        uint address = _state.R[13] + offset; // SP is R13
+
+        if ((opcode & 0x0800) != 0) // Load
+        {
+            _state.R[rd] = _bus.Read32(address);
+        }
+        else // Store
+        {
+            _bus.Write32(address, _state.R[rd]);
+        }
+    }
+
+    private void ExecuteThumbLoadAddress(ushort opcode)
+    {
+        int rd = (opcode >> 8) & 0x7;
+        uint offset = (uint)((opcode & 0xFF) << 2);
+
+        if ((opcode & 0x0800) != 0) // SP
+        {
+            _state.R[rd] = _state.R[13] + offset;
+        }
+        else // PC
+        {
+            _state.R[rd] = (_state.Pc & ~3u) + offset;
+        }
+    }
+
+    private void ExecuteThumbAddOffsetToSp(ushort opcode)
+    {
+        uint offset = (uint)((opcode & 0x7F) << 2);
+        bool subtract = ((opcode >> 7) & 1) != 0;
+
+        if (subtract)
+        {
+            _state.R[13] -= offset;
+        }
+        else
+        {
+            _state.R[13] += offset;
+        }
+    }
+
+    private void ExecuteThumbPushPop(ushort opcode)
+    {
+        bool load = ((opcode >> 11) & 1) != 0;
+        bool pcLr = ((opcode >> 8) & 1) != 0;
+        int rlist = opcode & 0xFF;
+
+        if (load) // POP
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                if ((rlist & (1 << i)) != 0)
+                {
+                    _state.R[i] = _bus.Read32(_state.R[13]);
+                    _state.R[13] += 4;
+                }
+            }
+            if (pcLr)
+            {
+                _state.Pc = _bus.Read32(_state.R[13]);
+                _state.R[13] += 4;
+            }
+        }
+        else // PUSH
+        {
+            int count = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                if ((rlist & (1 << i)) != 0) count++;
+            }
+            if (pcLr) count++;
+
+            // Push in reverse order
+            if (pcLr)
+            {
+                _state.R[13] -= 4;
+                _bus.Write32(_state.R[13], _state.R[14]); // Push LR
+            }
+            for (int i = 7; i >= 0; i--)
+            {
+                if ((rlist & (1 << i)) != 0)
+                {
+                    _state.R[13] -= 4;
+                    _bus.Write32(_state.R[13], _state.R[i]);
+                }
+            }
+        }
+    }
+
+    private void ExecuteThumbMultipleLoadStore(ushort opcode)
+    {
+        bool load = ((opcode >> 11) & 1) != 0;
+        int rb = (opcode >> 8) & 0x7;
+        int rlist = opcode & 0xFF;
+        uint address = _state.R[rb];
+
+        if (load) // LDMIA
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                if ((rlist & (1 << i)) != 0)
+                {
+                    _state.R[i] = _bus.Read32(address);
+                    address += 4;
+                }
+            }
+            _state.R[rb] = address; // Writeback
+        }
+        else // STMIA
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                if ((rlist & (1 << i)) != 0)
+                {
+                    _bus.Write32(address, _state.R[i]);
+                    address += 4;
+                }
+            }
+            _state.R[rb] = address; // Writeback
+        }
+    }
+
+    private void ExecuteThumbConditionalBranch(ushort opcode)
+    {
+        int cond = (opcode >> 8) & 0xF;
+        int offset = (sbyte)(opcode & 0xFF);
+        offset <<= 1;
+
+        if (ConditionPassed((uint)cond))
+        {
+            _state.Pc = unchecked(_state.Pc + (uint)offset);
+        }
+    }
+
+    private void ExecuteThumbSwi(ushort opcode)
+    {
+        // Save current CPSR and PC before mode switch
+        uint oldCpsr = _state.Cpsr;
+        uint returnAddress = _state.Pc;
+
+        // Switch to Supervisor mode
+        _state.SwitchMode(CpuMode.Supervisor);
+
+        // Save old CPSR to SPSR_svc
+        _state.SetSpsr(oldCpsr);
+
+        // Set return address in R14_svc
+        _state.R[14] = returnAddress;
+
+        // Set IRQ disable flag and switch to ARM mode
+        _state.SetFlag(CpuFlags.IRQDisable, true);
+        _state.Thumb = false;
+
+        // Jump to SWI vector
+        _state.Pc = 0x00000008;
     }
 
     private void ExecuteThumbBranch(ushort opcode)
@@ -620,6 +1111,30 @@ public sealed class Arm7Tdmi
         }
         offset <<= 1;
         _state.Pc = unchecked(_state.Pc + (uint)offset);
+    }
+
+    private void ExecuteThumbLongBranchLink(ushort opcode)
+    {
+        bool secondInstruction = ((opcode >> 11) & 1) != 0;
+        uint offset = (uint)(opcode & 0x7FF);
+
+        if (!secondInstruction)
+        {
+            // First instruction: LR = PC + (offset << 12)
+            int signedOffset = (int)offset;
+            if ((offset & 0x400) != 0)
+            {
+                signedOffset |= unchecked((int)0xFFFFF800);
+            }
+            _state.R[14] = unchecked(_state.Pc + (uint)(signedOffset << 12));
+        }
+        else
+        {
+            // Second instruction: PC = LR + (offset << 1), LR = PC + 2 | 1
+            uint nextInst = _state.Pc - 2;
+            _state.Pc = _state.R[14] + (offset << 1);
+            _state.R[14] = nextInst | 1; // Set Thumb bit
+        }
     }
 
     private (uint value, bool carry) DecodeImmediateOperand(uint opcode)
