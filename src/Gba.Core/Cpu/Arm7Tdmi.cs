@@ -19,9 +19,18 @@ public sealed class Arm7Tdmi
     public void Reset(uint entryPoint = 0x08000000, bool thumb = false)
     {
         Array.Clear(_state.R);
-        _state.Cpsr = 0x0000001F;
-        _state.R[13] = 0x03007F00; // IWRAM top
+        _state.Cpsr = 0x000000DFu; // System mode, IRQ/FIQ disabled
+        _state.SwitchMode(CpuMode.System);
+        _state.R[13] = 0x03007F00; // IWRAM top (SP)
         _state.R[14] = 0;
+
+        // Set up stack pointers for IRQ and Supervisor modes
+        _state.SwitchMode(CpuMode.IRQ);
+        _state.R[13] = 0x03007FA0; // IRQ stack
+        _state.SwitchMode(CpuMode.Supervisor);
+        _state.R[13] = 0x03007FE0; // Supervisor stack
+        _state.SwitchMode(CpuMode.System); // Back to system mode
+
         _state.Pc = AlignEntryPoint(entryPoint, thumb);
         _state.Thumb = thumb;
         _state.CycleCount = 0;
@@ -43,6 +52,12 @@ public sealed class Arm7Tdmi
 
     public void StepInstruction()
     {
+        // Check for pending interrupts before executing instruction
+        if (_bus.HasPendingInterrupt() && !_state.GetFlag(CpuFlags.IRQDisable))
+        {
+            HandleInterrupt();
+        }
+
         if (_state.Thumb)
         {
             ExecuteThumb();
@@ -53,6 +68,32 @@ public sealed class Arm7Tdmi
             ExecuteArm();
             _state.CycleCount += 1;
         }
+    }
+
+    private void HandleInterrupt()
+    {
+        // Save current CPSR and PC before mode switch
+        uint oldCpsr = _state.Cpsr;
+        uint returnAddress = _state.Pc;
+
+        // Switch to IRQ mode
+        _state.SwitchMode(CpuMode.IRQ);
+
+        // Save old CPSR to SPSR_irq
+        _state.SetSpsr(oldCpsr);
+
+        // Set return address in R14_irq
+        _state.R[14] = returnAddress;
+
+        // Set IRQ disable flag and switch to ARM mode
+        _state.SetFlag(CpuFlags.IRQDisable, true);
+        _state.Thumb = false;
+
+        // Jump to IRQ vector
+        _state.Pc = 0x00000018;
+
+        // IRQ handling takes 3 cycles
+        _state.CycleCount += 3;
     }
 
     private void ExecuteArm()
