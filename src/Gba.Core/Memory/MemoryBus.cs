@@ -26,6 +26,9 @@ public sealed class MemoryBus
     private uint _openBus;
     private ushort _dispcnt;
     private ushort _keyinput = 0x03FF;
+    private ushort _bg0cnt;
+    private ushort _bg0hofs;
+    private ushort _bg0vofs;
 
     public MemoryBus(byte[] rom)
     {
@@ -38,6 +41,9 @@ public sealed class MemoryBus
     public Span<byte> MutableVram => _vram;
     public Span<byte> MutableIwram => _iwram;
     public ushort DisplayControl => _dispcnt;
+    public ushort Bg0Control => _bg0cnt;
+    public ushort Bg0HOffset => (ushort)(_bg0hofs & 0x1FF);
+    public ushort Bg0VOffset => (ushort)(_bg0vofs & 0x1FF);
 
     public void WriteDisplayControl(ushort value) => _dispcnt = (ushort)(value & 0x1FFF);
 
@@ -72,6 +78,12 @@ public sealed class MemoryBus
         {
             0x000 => (byte)(_dispcnt & 0xFF),
             0x001 => (byte)(_dispcnt >> 8),
+            0x008 => (byte)(_bg0cnt & 0xFF),
+            0x009 => (byte)(_bg0cnt >> 8),
+            0x010 => (byte)(_bg0hofs & 0xFF),
+            0x011 => (byte)(_bg0hofs >> 8),
+            0x012 => (byte)(_bg0vofs & 0xFF),
+            0x013 => (byte)(_bg0vofs >> 8),
             0x130 => (byte)(_keyinput & 0xFF),
             0x131 => (byte)(_keyinput >> 8),
             _ => unchecked((byte)_openBus)
@@ -140,6 +152,24 @@ public sealed class MemoryBus
             case 0x001:
                 _dispcnt = (ushort)((_dispcnt & 0x00FF) | (value << 8));
                 break;
+            case 0x008:
+                _bg0cnt = (ushort)((_bg0cnt & 0xFF00) | value);
+                break;
+            case 0x009:
+                _bg0cnt = (ushort)((_bg0cnt & 0x00FF) | (value << 8));
+                break;
+            case 0x010:
+                _bg0hofs = (ushort)((_bg0hofs & 0xFF00) | value);
+                break;
+            case 0x011:
+                _bg0hofs = (ushort)((_bg0hofs & 0x00FF) | (value << 8));
+                break;
+            case 0x012:
+                _bg0vofs = (ushort)((_bg0vofs & 0xFF00) | value);
+                break;
+            case 0x013:
+                _bg0vofs = (ushort)((_bg0vofs & 0x00FF) | (value << 8));
+                break;
         }
     }
 
@@ -169,5 +199,17 @@ public sealed class MemoryBus
         {
             _keyinput = (ushort)(InputSource.ReadKeys() | 0xFC00);
         }
+    }
+
+    public ushort ReadBgPaletteEntry(int index)
+    {
+        index &= 0xFF;
+        int offset = index * 2;
+        if (offset + 1 >= _pram.Length)
+        {
+            return 0;
+        }
+
+        return (ushort)(_pram[offset] | (_pram[offset + 1] << 8));
     }
 }

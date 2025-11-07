@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Gba.Core.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+eb03da5367e70436e6254a92fd8eaa4e02252f77")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+e317d9983e80be385b19298cbce420bf5f163ee8")]
 [assembly: System.Reflection.AssemblyProductAttribute("Gba.Core.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Gba.Core.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

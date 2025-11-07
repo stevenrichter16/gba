@@ -98,7 +98,22 @@ public sealed class Arm7Tdmi
         {
             case 0b000:
             case 0b001:
-                ExecuteArmDataProcessing(opcode);
+                if ((opcode & 0x0FC000F0) == 0x00000090)
+                {
+                    ExecuteArmMultiply(opcode);
+                }
+                else if ((opcode & 0x0F8000F0) == 0x00800090)
+                {
+                    ExecuteArmMultiplyLong(opcode);
+                }
+                else if ((opcode & 0x0E000090) == 0x00000090)
+                {
+                    ExecuteArmExtraTransfer(opcode);
+                }
+                else
+                {
+                    ExecuteArmDataProcessing(opcode);
+                }
                 break;
             case 0b010:
             case 0b011:
@@ -270,6 +285,153 @@ public sealed class Arm7Tdmi
         }
     }
 
+    private void ExecuteArmExtraTransfer(uint opcode)
+    {
+        bool pre = ((opcode >> 24) & 1) != 0;
+        bool add = ((opcode >> 23) & 1) != 0;
+        bool immediate = ((opcode >> 22) & 1) != 0;
+        bool writeBack = ((opcode >> 21) & 1) != 0;
+        bool load = ((opcode >> 20) & 1) != 0;
+        bool signedTransfer = ((opcode >> 6) & 1) != 0;
+        bool halfwordTransfer = ((opcode >> 5) & 1) != 0;
+
+        int rn = (int)((opcode >> 16) & 0xF);
+        int rd = (int)((opcode >> 12) & 0xF);
+
+        uint offset;
+        if (immediate)
+        {
+            offset = (uint)(((opcode >> 8) & 0xF) << 4 | (opcode & 0xF));
+        }
+        else
+        {
+            offset = _state.R[opcode & 0xF];
+        }
+
+        uint address = _state.R[rn];
+        uint effective = pre ? (add ? address + offset : address - offset) : address;
+
+        if (load)
+        {
+            if (!halfwordTransfer && !signedTransfer)
+            {
+                uint valueLo = _bus.Read32(effective);
+                uint valueHi = _bus.Read32(effective + 4);
+                _state.R[rd] = valueLo;
+                _state.R[(rd + 1) & 0xF] = valueHi;
+            }
+            else if (halfwordTransfer && !signedTransfer)
+            {
+                ushort value = _bus.Read16(effective);
+                _state.R[rd] = value;
+            }
+            else if (halfwordTransfer && signedTransfer)
+            {
+                short value = (short)_bus.Read16(effective);
+                _state.R[rd] = (uint)value;
+            }
+            else
+            {
+                sbyte value = (sbyte)_bus.Read8(effective);
+                _state.R[rd] = (uint)value;
+            }
+        }
+        else
+        {
+            if (!halfwordTransfer && !signedTransfer)
+            {
+                _bus.Write32(effective, _state.R[rd]);
+                _bus.Write32(effective + 4, _state.R[(rd + 1) & 0xF]);
+            }
+            else if (halfwordTransfer)
+            {
+                _bus.Write16(effective, (ushort)(_state.R[rd] & 0xFFFF));
+            }
+            else
+            {
+                _bus.Write8(effective, (byte)(_state.R[rd] & 0xFF));
+            }
+        }
+
+        if (!pre)
+        {
+            effective = add ? effective + offset : effective - offset;
+        }
+
+        if (writeBack || !pre)
+        {
+            _state.R[rn] = effective;
+        }
+    }
+
+    private void ExecuteArmMultiply(uint opcode)
+    {
+        bool accumulate = ((opcode >> 21) & 1) != 0;
+        bool setFlags = ((opcode >> 20) & 1) != 0;
+        int rd = (int)((opcode >> 16) & 0xF);
+        int rn = (int)((opcode >> 12) & 0xF);
+        int rs = (int)((opcode >> 8) & 0xF);
+        int rm = (int)(opcode & 0xF);
+
+        uint result = _state.R[rm] * _state.R[rs];
+        if (accumulate)
+        {
+            result += _state.R[rn];
+            _state.CycleCount += 1;
+        }
+
+        _state.R[rd] = result;
+
+        if (setFlags)
+        {
+            _state.SetFlag(CpuFlags.Zero, result == 0);
+            _state.SetFlag(CpuFlags.Negative, (result & 0x80000000) != 0);
+        }
+
+        _state.CycleCount += 2;
+    }
+
+    private void ExecuteArmMultiplyLong(uint opcode)
+    {
+        bool signedMul = ((opcode >> 22) & 1) != 0;
+        bool accumulate = ((opcode >> 21) & 1) != 0;
+        bool setFlags = ((opcode >> 20) & 1) != 0;
+        int rdHi = (int)((opcode >> 16) & 0xF);
+        int rdLo = (int)((opcode >> 12) & 0xF);
+        int rs = (int)((opcode >> 8) & 0xF);
+        int rm = (int)(opcode & 0xF);
+
+        ulong product;
+        if (signedMul)
+        {
+            long m = (long)(int)_state.R[rm];
+            long s = (long)(int)_state.R[rs];
+            product = (ulong)(m * s);
+        }
+        else
+        {
+            product = (ulong)_state.R[rm] * _state.R[rs];
+        }
+
+        if (accumulate)
+        {
+            ulong existing = ((ulong)_state.R[rdHi] << 32) | _state.R[rdLo];
+            product += existing;
+            _state.CycleCount += 1;
+        }
+
+        _state.R[rdLo] = (uint)product;
+        _state.R[rdHi] = (uint)(product >> 32);
+
+        if (setFlags)
+        {
+            _state.SetFlag(CpuFlags.Zero, product == 0);
+            _state.SetFlag(CpuFlags.Negative, (_state.R[rdHi] & 0x80000000) != 0);
+        }
+
+        _state.CycleCount += 3;
+    }
+
     private void ExecuteThumb()
     {
         uint pc = _state.Pc & ~1u;
@@ -435,20 +597,51 @@ public sealed class Arm7Tdmi
     {
         int rm = (int)(opcode & 0xF);
         uint value = _state.R[rm];
+        bool registerShift = ((opcode >> 4) & 1) != 0;
         int shiftType = (int)((opcode >> 5) & 0x3);
-        int shiftImm = (int)((opcode >> 7) & 0x1F);
-        if (shiftImm == 0 && shiftType is 0 or 1)
+
+        if (!registerShift)
         {
-            shiftImm = shiftType == 0 ? 0 : 32;
+            int shiftImm = (int)((opcode >> 7) & 0x1F);
+            if (shiftImm == 0)
+            {
+                return shiftType switch
+                {
+                    0 => (value, _state.GetFlag(CpuFlags.Carry)),
+                    1 => ShiftRightLogical(value, 32),
+                    2 => ShiftRightArithmetic(value, 32),
+                    3 => RotateRightExtend(value),
+                    _ => (value, _state.GetFlag(CpuFlags.Carry))
+                };
+            }
+
+            return shiftType switch
+            {
+                0 => ShiftLeft(value, shiftImm),
+                1 => ShiftRightLogical(value, shiftImm),
+                2 => ShiftRightArithmetic(value, shiftImm),
+                3 => RotateRight(value, shiftImm),
+                _ => (value, _state.GetFlag(CpuFlags.Carry))
+            };
         }
-        return shiftType switch
+        else
         {
-            0 => ShiftLeft(value, shiftImm),
-            1 => ShiftRightLogical(value, shiftImm),
-            2 => ShiftRightArithmetic(value, shiftImm),
-            3 => RotateRight(value, shiftImm == 0 ? 1 : shiftImm),
-            _ => (value, _state.GetFlag(CpuFlags.Carry))
-        };
+            int rs = (int)((opcode >> 8) & 0xF);
+            uint shiftAmount = _state.R[rs] & 0xFF;
+            if (shiftAmount == 0)
+            {
+                return (value, _state.GetFlag(CpuFlags.Carry));
+            }
+
+            return shiftType switch
+            {
+                0 => RegisterShiftLeft(value, shiftAmount),
+                1 => RegisterShiftRightLogical(value, shiftAmount),
+                2 => RegisterShiftRightArithmetic(value, shiftAmount),
+                3 => RegisterRotateRight(value, shiftAmount),
+                _ => (value, _state.GetFlag(CpuFlags.Carry))
+            };
+        }
     }
 
     private static (uint value, bool carry) ShiftLeft(uint value, int amount)
@@ -482,6 +675,67 @@ public sealed class Arm7Tdmi
         if (amount == 0) amount = 1;
         uint result = (value >> amount) | (value << (32 - amount));
         bool carry = ((result >> 31) & 1) != 0;
+        return (result, carry);
+    }
+
+    private static (uint value, bool carry) RegisterShiftLeft(uint value, uint amount)
+    {
+        if (amount < 32)
+        {
+            bool carry = (value & (1u << (int)(32 - amount))) != 0;
+            return (value << (int)amount, carry);
+        }
+        if (amount == 32)
+        {
+            return (0u, (value & 1u) != 0);
+        }
+        return (0u, false);
+    }
+
+    private static (uint value, bool carry) RegisterShiftRightLogical(uint value, uint amount)
+    {
+        if (amount < 32)
+        {
+            bool carry = ((value >> (int)(amount - 1)) & 1) != 0;
+            return (value >> (int)amount, carry);
+        }
+        if (amount == 32)
+        {
+            bool carry = (value & 0x80000000) != 0;
+            return (0u, carry);
+        }
+        return (0u, false);
+    }
+
+    private static (uint value, bool carry) RegisterShiftRightArithmetic(uint value, uint amount)
+    {
+        if (amount < 32)
+        {
+            bool carry = ((value >> (int)(amount - 1)) & 1) != 0;
+            uint result = (uint)((int)value >> (int)amount);
+            return (result, carry);
+        }
+        bool carryOut = (value & 0x80000000) != 0;
+        return (carryOut ? 0xFFFFFFFFu : 0u, carryOut);
+    }
+
+    private (uint value, bool carry) RegisterRotateRight(uint value, uint amount)
+    {
+        uint rot = amount & 0x1F;
+        if (rot == 0)
+        {
+            // RRX: rotate with carry
+            bool carry = (value & 1u) != 0;
+            uint result = (_state.GetFlag(CpuFlags.Carry) ? 0x80000000u : 0u) | (value >> 1);
+            return (result, carry);
+        }
+        return RotateRight(value, (int)rot);
+    }
+
+    private (uint value, bool carry) RotateRightExtend(uint value)
+    {
+        bool carry = (value & 1u) != 0;
+        uint result = (_state.GetFlag(CpuFlags.Carry) ? 0x80000000u : 0u) | (value >> 1);
         return (result, carry);
     }
 

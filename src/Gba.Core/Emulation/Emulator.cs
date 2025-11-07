@@ -43,7 +43,7 @@ public sealed class Emulator
         Bus.InputSource = Input;
         Bus.LatchInput();
         Cpu.StepCycles(CyclesPerFrame);
-        Ppu.RenderMode3();
+        Ppu.RenderFrame();
         Ppu.PresentTo(_rgba);
         Video?.PresentFrame(_rgba);
     }

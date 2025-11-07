@@ -16,20 +16,127 @@ public sealed class SimplePpu
 
     public ReadOnlySpan<ushort> Framebuffer => _framebuffer;
 
-    public void RenderMode3()
+    public void RenderFrame()
     {
-        if ((_bus.DisplayControl & 0x7) != 3)
+        switch (_bus.DisplayControl & 0x7)
         {
-            RenderGradient();
-            return;
+            case 0:
+                RenderBg0TextMode();
+                break;
+            case 3:
+                RenderMode3();
+                break;
+            default:
+                RenderGradient();
+                break;
         }
+    }
 
+    private void RenderMode3()
+    {
         var vram = _bus.Vram;
         var span = _framebuffer.AsSpan();
         int di = 0;
         for (int si = 0; si + 1 < vram.Length && di < span.Length; si += 2, di++)
         {
             span[di] = (ushort)(vram[si] | (vram[si + 1] << 8));
+        }
+    }
+
+    private void RenderBg0TextMode()
+    {
+        var span = _framebuffer.AsSpan();
+        span.Clear();
+
+        ushort bgCnt = _bus.Bg0Control;
+        bool palette256 = (bgCnt & (1 << 7)) != 0;
+        int charBase = ((bgCnt >> 2) & 0x3) * 0x4000;
+        int screenBase = ((bgCnt >> 8) & 0x1F) * 0x800;
+        int sizeBits = (bgCnt >> 14) & 0x3;
+        int mapWidthTiles = sizeBits switch
+        {
+            0 => 32,
+            1 => 64,
+            2 => 32,
+            3 => 64,
+            _ => 32
+        };
+        int mapHeightTiles = sizeBits switch
+        {
+            0 => 32,
+            1 => 32,
+            2 => 64,
+            3 => 64,
+            _ => 32
+        };
+        int mapWidthPixels = mapWidthTiles * 8;
+        int mapHeightPixels = mapHeightTiles * 8;
+
+        var vram = _bus.Vram;
+
+        for (int y = 0; y < 160; y++)
+        {
+            int scrolledY = (y + _bus.Bg0VOffset) % mapHeightPixels;
+            if (scrolledY < 0) scrolledY += mapHeightPixels;
+            int tileY = scrolledY / 8;
+            int tilePixelY = scrolledY & 7;
+
+            for (int x = 0; x < 240; x++)
+            {
+                int scrolledX = (x + _bus.Bg0HOffset) % mapWidthPixels;
+                if (scrolledX < 0) scrolledX += mapWidthPixels;
+                int tileX = scrolledX / 8;
+                int tilePixelX = scrolledX & 7;
+
+                int mapIndex = ((tileY % mapHeightTiles) * mapWidthTiles) + (tileX % mapWidthTiles);
+                int mapAddress = screenBase + mapIndex * 2;
+                if (mapAddress + 1 >= vram.Length)
+                {
+                    continue;
+                }
+
+                ushort entry = (ushort)(vram[mapAddress] | (vram[mapAddress + 1] << 8));
+                int tileIndex = entry & 0x03FF;
+                bool hFlip = (entry & (1 << 10)) != 0;
+                bool vFlip = (entry & (1 << 11)) != 0;
+                int paletteBank = (entry >> 12) & 0xF;
+
+                int tilePixelXEff = hFlip ? 7 - tilePixelX : tilePixelX;
+                int tilePixelYEff = vFlip ? 7 - tilePixelY : tilePixelY;
+
+                int tileSize = palette256 ? 64 : 32;
+                int tileBase = charBase + tileIndex * tileSize;
+                if (tileBase >= vram.Length)
+                {
+                    continue;
+                }
+
+                byte colorIndex;
+                if (palette256)
+                {
+                    int offset = tileBase + tilePixelYEff * 8 + tilePixelXEff;
+                    if (offset >= vram.Length)
+                    {
+                        continue;
+                    }
+                    colorIndex = vram[offset];
+                }
+                else
+                {
+                    int rowOffset = tilePixelYEff * 4;
+                    int offset = tileBase + rowOffset + (tilePixelXEff >> 1);
+                    if (offset >= vram.Length)
+                    {
+                        continue;
+                    }
+                    byte packed = vram[offset];
+                    colorIndex = (byte)((tilePixelXEff & 1) == 0 ? (packed & 0x0F) : (packed >> 4));
+                    colorIndex = (byte)(colorIndex + paletteBank * 16);
+                }
+
+                ushort color = _bus.ReadBgPaletteEntry(colorIndex);
+                span[y * 240 + x] = color;
+            }
         }
     }
 
